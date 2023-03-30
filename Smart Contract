@@ -1,0 +1,24 @@
+from pyteal import *
+
+# Define the parameters for the smart contract
+nft_id = 12345  # replace with the actual ID of your NFT
+num_votes_required = 113  # number of votes required to approve the proposal
+
+# Define the logic for the smart contract
+vote_counts = App.localGetEx(Int(0), App.id(), Bytes("vote_counts"))
+nft_owns = AssetHolding.balance(Int(nft_id), App.optFrom())
+vote = And(nft_owns, Gtxn[0].asset_amount() == Int(1))
+update_count = If(vote, App.localPut(Int(0), Bytes("vote_counts", Gtxn[0].sender()), vote_counts.value() + Int(1)), Return(Int(0)))
+approve = If(And(*[vote_counts.lookup(Int(owner)) >= Int(num_votes_required) for owner in vote_counts.keys()]), Int(1), Int(0))
+
+# Combine the logic into a TEAL program
+teal_program = Cond(
+    [Txn.application_id() == Int(0), Seq(update_count, Approve())],
+    [Txn.on_completion() == OnComplete.UpdateApplication, approve],
+)
+
+# Compile the TEAL program
+compiled_teal = compileTeal(teal_program, Mode.Application)
+
+# Print the compiled TEAL program
+print(compiled_teal)
