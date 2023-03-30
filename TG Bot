@@ -1,76 +1,73 @@
-import logging
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from algosdk import mnemonic
-from algosdk.v2client import algod
-from algosdk.future import transaction
+import time
+import qrcode
 from pyteal import *
+from algosdk import algod, account, encoding, mnemonic
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
 
-# Configure logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# Set the parameters for the smart contract
-nft_id = 12345  # replace with the actual ID of your NFT
-num_votes_required = 113  # number of votes required to approve the proposal
-
-# Set the Algorand network parameters
-algod_token = 'YOUR_ALGOD_TOKEN_HERE'
-algod_address = 'YOUR_ALGOD_ADDRESS_HERE'
+# Replace with your Algorand node URL and API token
+algod_address = 'https://testnet-algorand.api.purestake.io/ps2'
+algod_token = {'X-API-Key': 'YOUR_ALGOD_API_KEY'}
 algod_client = algod.AlgodClient(algod_token, algod_address)
 
-# Load the Algorand account and compile the PyTeal program
-mnemonic_secret = 'YOUR_MNEMONIC_SECRET_HERE'
-account = mnemonic.to_public_key(mnemonic_secret)
-compiled_program = compileTeal(<YOUR_PYTEAL_PROGRAM_HERE>, Mode.Application)
+# Replace with your PyTeal smart contract
+approval_program = compileTeal(ApprovalProgram(), mode=Mode.Application)
+clear_state_program = compileTeal(ClearStateProgram(), mode=Mode.Application)
 
-# Define the command handler for the /vote command
-def vote(update, context):
-    # Get the user's Algorand address from the Telegram user ID
-    user_id = update.message.from_user.id
-    user_address = str(user_id)
-
-    # Get the user's NFT balance
-    response = algod_client.account_info(user_address)
-    nft_balance = 0
-    for asset in response['assets']:
-        if asset['asset-id'] == nft_id:
-            nft_balance = asset['amount']
-            break
-
-    # Check if the user owns the NFT
-    if nft_balance == 0:
-        update.message.reply_text('You do not own the NFT.')
-        return
-
-    # Create the Algorand transaction to vote for the proposal
-    txn = transaction.AssetTransferTxn(
-        sender=user_address,
-        sp=params,
-        receiver=user_address,
-        amt=0,
-        index=nft_id,
-        close_assets_to=user_address,
-        asset_sender=user_address,
-        asset_receiver=user_address,
-        asset_amount=1,
-        asset_close_amount=0,
-        asset_id=nft_id,
-        note=compiled_program,
-    )
-
-    # Sign the transaction with the Algorand account
-    signed_txn = txn.sign(mnemonic_secret)
-
-    # Broadcast the transaction to the Algorand network
-    txid = algod_client.send_transaction(signed_txn)
-
-    update.message.reply_text('Vote submitted. Transaction ID: {}'.format(txid))
-
-# Create the Telegram bot
-updater = Updater('YOUR_BOT_TOKEN_HERE', use_context=True)
+# Replace with your Telegram bot API token
+updater = Updater(token='YOUR_TELEGRAM_BOT_TOKEN', use_context=True)
 dispatcher = updater.dispatcher
 
-# Register the command handler for the /vote command
-dispatcher.add_handler(CommandHandler('vote', vote))
+# Dictionary to store the votes
+votes = {
+    'yes': 0,
+    'no': 0,
+}
 
-# Start the Telegram bot
-updater.start_polling()
+# Start command handler
+def start(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Hello! Use /vote to start a new vote.")
+
+# Vote command handler
+def vote(update, context):
+    # Check if there is an ongoing vote
+    if votes['yes'] + votes['no'] > 0:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="There is already an ongoing vote.")
+        return
+
+    # Generate a new address for the vote
+    private_key, address = account.generate_account()
+
+    # Generate a QR code for the address
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(f'algorand:{address}')
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    img.save('qr.png')
+
+    # Send the QR code to the user
+    context.bot.send_photo(chat_id=update.effective_chat.id, photo=open('qr.png', 'rb'))
+
+    # Wait for 24 hours
+    time.sleep(86400)
+
+    # Get the current round number
+    status = algod_client.status()
+    current_round = status['last-round']
+
+    # Get the transaction information
+    txs = algod_client.transaction_info(address, current_round - 100, current_round)
+
+    # Count the votes
+    for tx in txs:
+        if tx['tx']['txn']['type'] == 'pay':
+            amount = tx['tx']['txn']['amt']
+            if amount == 1:
+                votes['yes'] += 1
+            elif amount == 2:
+                votes['no'] += 1
+
+    # Display the results
+    context.bot.send_message(chat_id=update.effective_chat.id, text=f"Approve/Yes: {votes['yes']}\nDeny/No: {votes['no']}")
+
+#
