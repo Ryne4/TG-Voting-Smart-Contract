@@ -1,0 +1,76 @@
+import logging
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from algosdk import mnemonic
+from algosdk.v2client import algod
+from algosdk.future import transaction
+from pyteal import *
+
+# Configure logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# Set the parameters for the smart contract
+nft_id = 12345  # replace with the actual ID of your NFT
+num_votes_required = 113  # number of votes required to approve the proposal
+
+# Set the Algorand network parameters
+algod_token = 'YOUR_ALGOD_TOKEN_HERE'
+algod_address = 'YOUR_ALGOD_ADDRESS_HERE'
+algod_client = algod.AlgodClient(algod_token, algod_address)
+
+# Load the Algorand account and compile the PyTeal program
+mnemonic_secret = 'YOUR_MNEMONIC_SECRET_HERE'
+account = mnemonic.to_public_key(mnemonic_secret)
+compiled_program = compileTeal(<YOUR_PYTEAL_PROGRAM_HERE>, Mode.Application)
+
+# Define the command handler for the /vote command
+def vote(update, context):
+    # Get the user's Algorand address from the Telegram user ID
+    user_id = update.message.from_user.id
+    user_address = str(user_id)
+
+    # Get the user's NFT balance
+    response = algod_client.account_info(user_address)
+    nft_balance = 0
+    for asset in response['assets']:
+        if asset['asset-id'] == nft_id:
+            nft_balance = asset['amount']
+            break
+
+    # Check if the user owns the NFT
+    if nft_balance == 0:
+        update.message.reply_text('You do not own the NFT.')
+        return
+
+    # Create the Algorand transaction to vote for the proposal
+    txn = transaction.AssetTransferTxn(
+        sender=user_address,
+        sp=params,
+        receiver=user_address,
+        amt=0,
+        index=nft_id,
+        close_assets_to=user_address,
+        asset_sender=user_address,
+        asset_receiver=user_address,
+        asset_amount=1,
+        asset_close_amount=0,
+        asset_id=nft_id,
+        note=compiled_program,
+    )
+
+    # Sign the transaction with the Algorand account
+    signed_txn = txn.sign(mnemonic_secret)
+
+    # Broadcast the transaction to the Algorand network
+    txid = algod_client.send_transaction(signed_txn)
+
+    update.message.reply_text('Vote submitted. Transaction ID: {}'.format(txid))
+
+# Create the Telegram bot
+updater = Updater('YOUR_BOT_TOKEN_HERE', use_context=True)
+dispatcher = updater.dispatcher
+
+# Register the command handler for the /vote command
+dispatcher.add_handler(CommandHandler('vote', vote))
+
+# Start the Telegram bot
+updater.start_polling()
