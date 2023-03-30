@@ -1,73 +1,123 @@
-import time
-import qrcode
-from pyteal import *
-from algosdk import algod, account, encoding, mnemonic
+import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
+from datetime import datetime, timedelta
+import pyteal
+import qrcode
 
-# Replace with your Algorand node URL and API token
-algod_address = 'https://testnet-algorand.api.purestake.io/ps2'
-algod_token = {'X-API-Key': 'YOUR_ALGOD_API_KEY'}
-algod_client = algod.AlgodClient(algod_token, algod_address)
+# Initialize the logging module
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Replace with your PyTeal smart contract
-approval_program = compileTeal(ApprovalProgram(), mode=Mode.Application)
-clear_state_program = compileTeal(ClearStateProgram(), mode=Mode.Application)
+# Define the PyTeal smart contract
+approval_program = pyteal.compileTeal('''
+// Read the transaction sender's address
+txn Sender
 
-# Replace with your Telegram bot API token
-updater = Updater(token='YOUR_TELEGRAM_BOT_TOKEN', use_context=True)
+// Check if the sender is authorized to vote
+addr authorized = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+txn Sender == authorized
+
+// Check if the current time is within the voting window (24 hours)
+txn Time
+int start_time
+int end_time
+start_time Btoi
+end_time Btoi
+txn TimeRange [start_time, end_time]
+And
+
+// Define the voting options
+int approve
+int deny
+txn ApplicationArgs [0]
+int 1
+==
+txn ApplicationArgs [1]
+int 0
+==
+
+// Record the vote in local storage
+byte "vote"
+Approve approve
+Store
+
+''')
+
+# Define the PyTeal smart contract for counting the votes
+count_program = pyteal.compileTeal('''
+// Define the voting options
+int approve
+int deny
+
+// Initialize the vote counters
+int approve_count
+int deny_count
+
+// Retrieve the stored votes from local storage and update the counters
+byte "vote"
+Load
+Approve
+approve_count ++
+Load
+Deny
+deny_count ++
+
+// Check if the vote counting period has ended (24 hours)
+int end_time
+txn ApplicationArgs [0]
+Btoi
+txn Time
+int start_time
+int duration
+duration end_time start_time -
+> = 
+
+// Return the vote counts
+approve_count
+deny_count
+''')
+
+import telegram
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
+import qrcode
+import time
+
+# Replace YOUR_API_KEY with your actual Telegram Bot API key
+bot = telegram.Bot(token='6239238673:AAGIvx8tpOxifj6ymDJ4l_bNoCiAignFTTU')
+updater = Updater(token='6239238673:AAGIvx8tpOxifj6ymDJ4l_bNoCiAignFTTU', use_context=True)
 dispatcher = updater.dispatcher
 
-# Dictionary to store the votes
-votes = {
-    'yes': 0,
-    'no': 0,
-}
-
-# Start command handler
+# Define the function to handle the /start command
 def start(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Hello! Use /vote to start a new vote.")
+    # Send a welcome message and instructions for how to vote
+    message = 'Welcome to the voting bot!\nTo vote, use the /vote command.'
+    update.message.reply_text(message)
 
-# Vote command handler
+# Define the function to handle the /vote command
 def vote(update, context):
-    # Check if there is an ongoing vote
-    if votes['yes'] + votes['no'] > 0:
-        context.bot.send_message(chat_id=update.effective_chat.id, text="There is already an ongoing vote.")
-        return
-
-    # Generate a new address for the vote
-    private_key, address = account.generate_account()
-
-    # Generate a QR code for the address
-    qr = qrcode.QRCode(version=1, box_size=10, border=4)
-    qr.add_data(f'algorand:{address}')
+    # Check if the voting window is open (24 hours from the current time)
+    now = datetime.now()
+    start_time = now.strftime('%s')
+    end_time = (now + timedelta(hours=24)).strftime('%s')
+    vote_period = {'start_time': start_time, 'end_time': end_time}
+    
+    # Create a unique message ID for this vote
+    message_id = update.message.message_id
+    
+    # Generate a QR code for the vote
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+    qr.add_data(f'pyteal:{"0x" + approval_program.hex()}')
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    img.save('qr.png')
-
+    qr_img = qr.make_image(fill_color='black', back_color='white')
+    qr_img.save(f'{message_id}.png')
+    
     # Send the QR code to the user
-    context.bot.send_photo(chat_id=update.effective_chat.id, photo=open('qr.png', 'rb'))
+    update.message.reply_photo(photo=open(f'{message_id}.png', 'rb'))
+    
+    # Add the vote period and message ID to the user's session data
+    context.user_data['vote_period'] = vote_period
+    context.user_data['message_id'] = message_id
 
-    # Wait for 24 hours
-    time.sleep(86400)
-
-    # Get the current round number
-    status = algod_client.status()
-    current_round = status['last-round']
-
-    # Get the transaction information
-    txs = algod_client.transaction_info(address, current_round - 100, current_round)
-
-    # Count the votes
-    for tx in txs:
-        if tx['tx']['txn']['type'] == 'pay':
-            amount = tx['tx']['txn']['amt']
-            if amount == 1:
-                votes['yes'] += 1
-            elif amount == 2:
-                votes['no'] += 1
-
-    # Display the results
-    context.bot.send_message(chat_id=update.effective_chat.id, text=f"Approve/Yes: {votes['yes']}\nDeny/No: {votes['no']}")
-
-#
+# Define the function to handle button clicks
+def button(update, context):
+    query = update.callback
